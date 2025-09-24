@@ -13,8 +13,8 @@ Model compression has emerged as a way to reduce the cost of using image super r
 
 ```bash
 # clone
-git clone https://github.com/anonymous-researcher-99/srtquant.git
-cd srtquant
+git clone https://github.com/anonymous-researcher-99/CompSRT.git
+cd CompSRT
 
 # conda env
 conda create -n srtquant python=3.8 -y
@@ -33,14 +33,14 @@ python setup.py develop
 
 ```bash
 # clone
-git clone https://github.com/anonymous-researcher-99/srtquant.git
-cd srtquant
+git clone https://github.com/anonymous-researcher-99/CompSRT.git
+cd CompSRT
 
 # create docker environment
-docker buildx build --no-cache --memory=48g --platform linux/amd64 -t srtquant:upgradedtorch --output=type=docker,dest=srtquant_upgradedtorch.tar .
+docker buildx build --no-cache --memory=48g --platform linux/amd64 -t compsrt:image --output=type=docker,dest=compsrt_image.tar .
 
 # create singularity environment 
-singularity build srtquant_upgradedtorch.sif docker-archive:path/to/srtquant_upgradedtorch.tar
+singularity build compsrt_image.sif docker-archive:path/to/compsrt_image.tar
 ```
 
 ## Datasets
@@ -69,7 +69,7 @@ python basicsr/train.py -opt options/train/ \
 ```bash
 sbatch run_srtquant.sbatch --pruning 0.4 
  ```
->pruning denotes the desired pruning ratio. Adjust paths and parameters within run_srt.sh as needed.  
+>pruning denotes the desired pruning ratio. Adjust paths and parameters within run_srt.sh and run_srtquant.sbatch as needed.  
 ---
 
 ## Testing 
@@ -87,7 +87,7 @@ sbatch run_srtquant.sbatch --pruning 0.4
 ```bash
 sbatch run_srtquant_test.sbatch --pruning 0.4
 ```
-> Please update the relevant paths for the best model within run_srt_test.sh 
+> Please update the relevant paths for the best model within run_srt_test.sh and run_srtquant_test.sbatch
 ---
 
 ## Statistics & significance testing

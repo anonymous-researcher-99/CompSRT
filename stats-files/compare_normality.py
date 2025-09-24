@@ -338,5 +338,5 @@ def main(directory_path: str):
 
 if __name__ == "__main__":
     # Set your directory path here (mirror style of range_reduction_final.py)
-    directory_path = "/Users/dorsazeinali/Desktop/weights_and_activs"  # <-- change this
+    directory_path = "path/to/weights_and_activs"  # <-- change this
     main(directory_path)

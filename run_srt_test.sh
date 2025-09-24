@@ -1,6 +1,4 @@
 #!/bin/bash
-cd /scratch/zeinali.d/srtquant
-
 # Activate Conda
 # source /opt/conda/etc/profile.d/conda.sh
 source /opt/conda/etc/profile.d/conda.sh

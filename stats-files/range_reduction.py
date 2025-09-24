@@ -346,5 +346,5 @@ def main(directory: str):
 
 if __name__ == "__main__":
     # Set your directory path here
-    directory_path = "/Users/dorsazeinali/Desktop/weights_and_activs"  # <-- change this
+    directory_path = "path/to/weights_and_activs"  # <-- change this
     main(directory_path)

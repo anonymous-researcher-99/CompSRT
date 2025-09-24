@@ -16,11 +16,11 @@
 
 nvidia-smi --query-gpu=name,memory.total --format=csv 
 
-SIF_FILE=/scratch/zeinali.d/srtquant_upgradedtorch.sif #update this 
+SIF_FILE=./compsrt_image.sif #update this 
 # export SINGULARITYENV_NVIDIA_DRIVER_CAPABILITIES=compute,utility 
 # export APPTAINERENV_NVIDIA_DRIVER_CAPABILITIES=compute,utility 
 # export SINGULARITY_NV=1
 # export SINGULARITY_NVLIBLIST="libcuda.so.1,libnvidia-ml.so.1,libcudart.so.11.0,libnvrtc.so.11.1,libcublas.so.11,libcublasLt.so.11,libcufft.so.10,libcurand.so.10,libcusolver.so.11,libcusparse.so.11"
 
-singularity exec -B  "/scratch/zeinali.d:/scratch/zeinali.d" --pwd /scratch/zeinali.d/srtquant --env PYTHONPATH=/scratch/zeinali.d/srtquant:$PYTHONPATH,PYTHONDONTWRITEBYTECODE=1  --nv "${SIF_FILE}" /scratch/zeinali.d/srtquant/run_srt.sh "$@"
+singularity exec -B  "CompSRT:CompSRT" --pwd CompSRT --env PYTHONPATH=CompSRT:$PYTHONPATH,PYTHONDONTWRITEBYTECODE=1  --nv "${SIF_FILE}" run_srt.sh "$@" 
 
