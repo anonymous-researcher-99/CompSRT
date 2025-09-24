@@ -56,7 +56,8 @@ Weights and activations data is for running the statistical analysis for pre/pos
 
 
 ## Training (w/ optional pruning)
-> Requires 48GB of memory. 
+> Requires 48GB of memory.
+> To not prune, set --pruning to 0.0  
 
 > Without slurm 
 ```bash
