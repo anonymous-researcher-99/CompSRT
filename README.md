@@ -20,7 +20,7 @@ cd CompSRT
 conda create -n srtquant python=3.8 -y
 conda activate srtquant
 
-# pytorch (example: CUDA 11.1 wheels)
+# pytorch (CUDA 11.1 wheels)
 pip install six
 pip install torch==1.8.0+cu111 torchvision==0.9.0+cu111 torchaudio===0.8.0 \
   -f https://download.pytorch.org/whl/torch_stable.html
@@ -50,7 +50,7 @@ Download:
    * [Testing set](https://drive.google.com/file/d/1yMbItvFKVaCT93yPWmlP3883XtJ-wSee/view?usp=sharing) and place them in `datasets/`
    * [Calibration data](https://drive.google.com/file/d/1UxgyQWrToZHxsMrPursuMBtyCcNjFwUA/view?usp=drive_link)  
    * [Pretrained models](https://drive.google.com/file/d/12g_64n-hhJJbvd6cpU7VakxruGRpzhP-/view?usp=drive_link) 
-   * [weights_and_activations](https://drive.google.com/drive/folders/1oDRIULwXkslpqBCAFt4AxHvq57QQpoao?usp=share_link) 
+   * [weights_and_activations](https://drive.google.com/file/d/1S9Vi8IyjmCY3ymmanyEDSDVY7MHAHRm5/view?usp=share_link) 
 
 Weights and activations data is for running the statistical analysis for pre/post Hadamard transformation. 
 
