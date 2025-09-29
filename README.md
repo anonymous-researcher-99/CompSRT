@@ -1,4 +1,4 @@
-# CompSRT: Compression for Image Super-Resolution Transformers (SwinIR-light)
+# CompSRT: Quantization and Pruning for Image Super-Resolution Transformers
 
 ## Abstract
 
