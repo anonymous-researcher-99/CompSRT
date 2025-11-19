@@ -52,7 +52,7 @@ Download:
    * [Pretrained models](https://drive.google.com/file/d/12g_64n-hhJJbvd6cpU7VakxruGRpzhP-/view?usp=drive_link) 
    * [weights_and_activations](https://drive.google.com/file/d/1S9Vi8IyjmCY3ymmanyEDSDVY7MHAHRm5/view?usp=share_link) 
 
-Weights and activations data is for running the statistical analysis for pre/post Hadamard transformation. 
+Weights and activations data is for running the statistical analysis for pre/post Hadamard transformation for the x2 model. 
 
 
 ## Training (w/ optional pruning)
@@ -62,8 +62,7 @@ Weights and activations data is for running the statistical analysis for pre/pos
 > Without slurm 
 ```bash
 # Example: 4-bit x4 SR
-python basicsr/train.py -opt options/train/ \
- --pruning 0.4 train_srtquant_x4.yml \ 
+python basicsr/train.py -opt options/train/train_srtquant_x4.yml --pruning 0.4\
  --force_yml bit=4 name=train_srtquant_x4_bit4
  ```
 > Using slurm 
