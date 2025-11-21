@@ -225,13 +225,13 @@ class FakeQuantizerBase(Module):
     def __init__(self, int_quant: bool = True, bit:int=4) -> None:
         super().__init__()
         self.lower_bound = Parameter(
-            torch.randn((1,), dtype=torch.float32),
+            torch.randn((1,), dtype=torch.float32,requires_grad=True),
         )
         self.upper_bound = Parameter(
-            torch.randn((1,), dtype=torch.float32),
+            torch.randn((1,), dtype=torch.float32,requires_grad=True),
         )
         self.n_bit = Parameter(
-            torch.randn((1,), dtype=torch.float32),
+            torch.randn((1,), dtype=torch.float32,requires_grad=False),
         )
         self.alpha = Parameter(
             torch.FloatTensor([0]),requires_grad=True #False to not add trainable params 
@@ -270,6 +270,9 @@ class FakeQuantizerBase(Module):
     def set_require_grad(self, enable_lb: bool, enable_up: bool, enable_nbit: bool):
         self.lower_bound.requires_grad = enable_lb
         self.upper_bound.requires_grad = enable_up
+        
+        # self.lower_bound.requires_grad = False
+        # self.upper_bound.requires_grad = False
         # self.alpha.requires_grad = True
         # self.beta.requires_grad = True
         # self.n_bit.requires_grad = enable_nbit
@@ -302,7 +305,7 @@ class FakeQuantizerWeight(FakeQuantizerBase):
         if not self.calibrated:
             #insert hadamard 
             # print("weight calibration")
-            print(calibrated_num+1, self.name)
+            # print(calibrated_num+1, self.name)
             # file_path = f"./weights_and_activs/{calibrated_num+1}_weight_prehad.pt"
             # torch.save(x,file_path)
             had_x,slices = hadamard_transform_nd(x)
@@ -393,7 +396,7 @@ class FakeQuantizerAct(FakeQuantizerBase):
 
     def forward(self, x):
         if not self.calibrated:
-            print(calibrated_num+1, self.name)
+            # print(calibrated_num+1, self.name)
             # print("activ calibration")
             had_x,slices = hadamard_transform_nd(x)
             # file_path = f"./weights_and_activs/{calibrated_num+1}_activation_prehad.pt"
@@ -592,6 +595,30 @@ class FakeQuantizerActParam2(FakeQuantizerBase):
         r = self.round((c - Z) / s)
 
         return s * r + Z
+
+class QuantWeight(Module):
+    """
+    Standalone quantizer for a parameter tensor.
+    Uses the SAME quantization logic as QuantLinear.
+    """
+    def __init__(self, weight: torch.Tensor, config: dict):
+        super().__init__()
+        self.weight_fp = torch.nn.Parameter(weight.detach().clone())
+        self.quant = True
+        self.bit = config['bit']
+        self.name = config['name']
+        self.pruning_keep_frac = config['pruning_keep_frac']
+        self.weight_quantizer = FakeQuantizerWeight(self.bit,self.pruning_keep_frac,self.name)
+
+    def set_quant_flag(self, flag: bool):
+        self.quant = flag
+
+    def forward(self):
+        if not self.quant:
+            return self.weight_fp
+        
+        quant_weight = self.weight_quantizer(self.weight_fp)
+        return quant_weight
 
 
 class QuantBase(Module):

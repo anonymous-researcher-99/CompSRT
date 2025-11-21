@@ -985,7 +985,7 @@ class SwinIR(nn.Module):
             self.mean = torch.zeros(1, 1, 1, 1)
         self.upscale = upscale
         self.upsampler = upsampler
-
+        print("initializing the swinIR")
         # ------------------------- 1, shallow feature extraction ------------------------- #
         self.conv_first = nn.Conv2d(num_in_ch, embed_dim, 3, 1, 1)
 

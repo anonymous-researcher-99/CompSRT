@@ -2,7 +2,7 @@ from functools import partial
 import os
 import time
 import numpy as np
-import torch,gc
+import torch, gc
 import cv2
 import io 
 import re
@@ -21,8 +21,9 @@ from torch.nn import Module
 from torch import Tensor
 from basicsr.utils.registry import MODEL_REGISTRY
 
-from basicsr.archs.quant_arch import QuantConv2d, QuantLinear, QuantLinearQKV, FakeQuantizerAct, FakeQuantizerBase
-from basicsr.archs.swinir_arch import SwinTransformerBlock, RSTB
+from basicsr.archs.quant_arch import QuantConv2d, QuantLinear, QuantLinearQKV, FakeQuantizerAct, FakeQuantizerBase, QuantWeight
+# Import MambaIRv2-specific architectures
+from basicsr.archs.mambairv2light_arch import AttentiveLayer, ASSM, BasicBlock,Selective_Scan
 from tqdm import tqdm
 from basicsr.utils import get_root_logger, imwrite, tensor2img
 from os import path as osp
@@ -32,7 +33,7 @@ from torch.optim import Adam
 from torchvision.transforms import Resize
 
 @MODEL_REGISTRY.register()
-class TDQuantModel:
+class MambaQuantModel:
     def __init__(self, opt):
         self.opt = opt
         self.logger = get_root_logger()
@@ -58,11 +59,51 @@ class TDQuantModel:
             "params",
         )
 
-
         self.build_quantized_network()  # Quantized model self.net_Q
         self.net_Q = self.net_Q.to(self.device)
-       
+         # FREEZE EVERYTHING IN THE ENTIRE NETWORK
+        print("\n=== FREEZING ALL PARAMETERS ===")
+        frozen_count = 0
+        for name, param in self.net_Q.named_parameters():
+            param.requires_grad = False
+            frozen_count += 1
+        print(f"Froze {frozen_count} parameters")
+        print("=" * 50)
         
+        # THEN UNFREEZE ONLY QUANTIZATION PARAMETERS
+        print("\n=== UNFREEZING QUANTIZATION PARAMETERS ===")
+        unfrozen_count = 0
+        for mod_name, module in self.net_Q.named_modules():
+            # Unfreeze QuantLinear quantization params
+            if isinstance(module, QuantLinear) or isinstance(module, QuantWeight):
+                if hasattr(module, 'weight_quantizer'):
+                    for name,param in module.weight_quantizer.named_parameters():
+                        if name != "n_bit": 
+                            # print(name)
+                            if 'bound' not in name and 'alpha' not in name and 'beta' not in name: 
+                                print(name)
+                            param.requires_grad = True
+                            unfrozen_count += 1
+                if hasattr(module, 'act_quantizer'):
+                    for name, param in module.act_quantizer.named_parameters():
+                        if name!= "n_bit": 
+                            # print(name)
+                            if 'bound' not in name and 'alpha' not in name and 'beta' not in name: 
+                                print(name)
+                            param.requires_grad = True
+                            unfrozen_count += 1
+            # Unfreeze standalone activation quantizers
+            if isinstance(module, FakeQuantizerAct):
+                for name,param in module.named_parameters():
+                    if name!= "n_bit": 
+                        # print(name)
+                        if 'bound' not in name and 'alpha' not in name and 'beta' not in name: 
+                                print(name)
+                        param.requires_grad = True
+                        unfrozen_count += 1
+    
+        print(f"Unfroze {unfrozen_count} quantization parameters")
+        print("=" * 50)
         if self.opt['path']['pretrain_network_Q'] != None:
             self.load_network(
                 self.net_Q,
@@ -76,7 +117,7 @@ class TDQuantModel:
                     module.calibrated = True
             if self.opt.get('quant_conv', False):
                 for name, module in self.net_Q.named_modules():
-                    if isinstance(module, RSTB):
+                    if isinstance(module, MambaLayer):
                         c:QuantConv2d = module.conv
                         c.act_quantizer.calibrated = True
                         c.act_quantizer.dynamic = True
@@ -135,14 +176,22 @@ class TDQuantModel:
 
         optim_bound_params = []
         for name, module in self.net_Q.named_modules():
-            if isinstance(module, QuantLinear):
+            if isinstance(module, QuantLinear) or isinstance(module, QuantWeight):
                 for name, param in module.named_parameters():
+                    # print(name)
+                    # if param.requires_grad: 
+                        # print(name)
                     if name.endswith('bound') or "alpha" in name or "beta_Z" in name:
                         optim_bound_params.append(param)
                         # logger.info(f'{name} is added in optim_bound_params')
 
         for name, module in self.quant_act.items():
             for name, param in module.named_parameters():
+                # print(name)
+                if 'n_bit' in name: 
+                    param.requires_grad=False 
+                # if param.requires_grad: 
+                #         # print(name)
                 if name.endswith('bound') or "alpha" in name or "beta_Z" in name:
                     optim_bound_params.append(param)
                     # logger.info(f'{name} is added in optim_bound_params')
@@ -163,7 +212,7 @@ class TDQuantModel:
         if self.opt.get('quant_conv', False):
             self.quant_conv:dict[str, QuantConv2d] = {}
 
-        def replace_linear(linear: QuantLinear, config:dict, qkv:bool=False):
+        def replace_linear(linear: nn.Linear, config:dict, qkv:bool=False):
             if qkv:
                 q_linear = QuantLinearQKV(config)
             else:
@@ -171,6 +220,7 @@ class TDQuantModel:
             q_linear.set_param(linear)
             q_linear.set_quant_flag(True)
             return q_linear
+        
         if self.opt.get('quant_conv', False):
             def replace_conv(conv: QuantConv2d, config:dict):
                 q_conv = QuantConv2d(config)
@@ -183,54 +233,111 @@ class TDQuantModel:
             'pruning_keep_frac': self.opt['prune_keep_frac'],
         }
         
+        # Import MambaIRv2-specific modules
+        from basicsr.archs.mambairv2light_arch import AttentiveLayer, ConvFFN, GatedMLP, WindowAttention, ASSM
+        
+        # Quantize AttentiveLayer (main block in MambaIRv2)
         for name, module in self.net_Q.named_modules():
-            if isinstance(module, SwinTransformerBlock):
-                config['name'] = name+".qkv" 
-                module.attn.qkv = replace_linear(module.attn.qkv, config, qkv=self.opt['quant']['qkv_separation'])
-                config['name'] = name+".attn.proj" 
-                module.attn.proj = replace_linear(module.attn.proj, config)
-                config['name'] = name+".mlp.fc1" 
-                module.mlp.fc1 = replace_linear(module.mlp.fc1, config)
-                config['name'] = name+".mlp.fc2"
-                module.mlp.fc2 = replace_linear(module.mlp.fc2, config)
+            if isinstance(module, AttentiveLayer):
+                # Window Multi-Head Self-Attention QKV projection
+                config['name'] = name+".wqkv"
+                module.wqkv = replace_linear(module.wqkv, config, qkv=self.opt['quant'].get('qkv_separation', False))
+                self.quant_linears[f"{name}.wqkv"] = module.wqkv
+                
+                # Add activation quantizers for attention
+                module.mymodule_q = FakeQuantizerAct(self.opt['bit'])
+                module.mymodule_k = FakeQuantizerAct(self.opt['bit'])
+                module.mymodule_v = FakeQuantizerAct(self.opt['bit'])
+                module.mymodule_attn = FakeQuantizerAct(self.opt['bit'])
+                
+                self.quant_act[f'{name}.mymodule_q'] = module.mymodule_q
+                self.quant_act[f'{name}.mymodule_k'] = module.mymodule_k
+                self.quant_act[f'{name}.mymodule_v'] = module.mymodule_v
+                self.quant_act[f'{name}.mymodule_attn'] = module.mymodule_attn
             
+            # Quantize WindowAttention projection
+            if isinstance(module, WindowAttention):
+                config['name'] = name+".proj"
+                module.proj = replace_linear(module.proj, config)
+                self.quant_linears[f"{name}.proj"] = module.proj
+            
+            # Quantize ConvFFN layers
+            if isinstance(module, ConvFFN):
+                config['name'] = name+".fc1"
+                module.fc1 = replace_linear(module.fc1, config)
+                self.quant_linears[f"{name}.fc1"] = module.fc1
                 
-                if self.opt['quant']['qkv_separation']:
-                    self.quant_linears[f"{name}.attn.qkv.q"] = module.attn.qkv.q
-                    self.quant_linears[f"{name}.attn.qkv.k"] = module.attn.qkv.k
-                    self.quant_linears[f"{name}.attn.qkv.v"] = module.attn.qkv.v
-                else:
-                    self.quant_linears[f"{name}.attn.qkv"] = module.attn.qkv
-                self.quant_linears[f"{name}.attn.proj"] = module.attn.proj
-                self.quant_linears[f"{name}.mlp.fc1"] = module.mlp.fc1
-                self.quant_linears[f"{name}.mlp.fc2"] = module.mlp.fc2
-
-                module.attn.mymodule_q = FakeQuantizerAct(self.opt['bit'])
-                module.attn.mymodule_k = FakeQuantizerAct(self.opt['bit'])
-                module.attn.mymodule_v = FakeQuantizerAct(self.opt['bit'])
-                module.attn.mymodule_a = FakeQuantizerAct(self.opt['bit'])
+                config['name'] = name+".fc2"
+                module.fc2 = replace_linear(module.fc2, config)
+                self.quant_linears[f"{name}.fc2"] = module.fc2
+            
+            # Quantize GatedMLP layers
+            if isinstance(module, GatedMLP):
+                config['name'] = name+".fc1"
+                module.fc1 = replace_linear(module.fc1, config)
+                self.quant_linears[f"{name}.fc1"] = module.fc1
                 
-                self.quant_act[f'{name}.attn.mymodule_q'] = module.attn.mymodule_q
-                self.quant_act[f'{name}.attn.mymodule_k'] = module.attn.mymodule_k
-                self.quant_act[f'{name}.attn.mymodule_v'] = module.attn.mymodule_v
-                self.quant_act[f'{name}.attn.mymodule_a'] = module.attn.mymodule_a
+                config['name'] = name+".fc2"
+                module.fc2 = replace_linear(module.fc2, config)
+                self.quant_linears[f"{name}.fc2"] = module.fc2
+            
+            # Quantize ASSM (Attentive State Space Module)
+            if isinstance(module, ASSM):
+                config['name'] = name+".out_proj"
+                module.out_proj = replace_linear(module.out_proj, config)
+                self.quant_linears[f"{name}.out_proj"] = module.out_proj
+                
+                # Quantize route network (3 linear layers)
+                if hasattr(module.route, '__iter__'):
+                    for i, layer in enumerate(module.route):
+                        if isinstance(layer, nn.Linear):
+                            config['name'] = f"{name}.route.{i}"
+                            module.route[i] = replace_linear(layer, config)
+                            self.quant_linears[f"{name}.route.{i}"] = module.route[i]
+                
+                # Add activation quantizers for ASSM
+                module.mymodule_x = FakeQuantizerAct(self.opt['bit'])
+                module.mymodule_prompt = FakeQuantizerAct(self.opt['bit'])
+                module.mymodule_scan = FakeQuantizerAct(self.opt['bit'])
+                
+                self.quant_act[f'{name}.mymodule_x'] = module.mymodule_x
+                self.quant_act[f'{name}.mymodule_prompt'] = module.mymodule_prompt
+                self.quant_act[f'{name}.mymodule_scan'] = module.mymodule_scan
+            
+            # Optionally quantize convolutions
             if self.opt.get('quant_conv', False):
-                if isinstance(module, RSTB):
-                    config['name'] = name+".conv"
+                if isinstance(module, nn.Conv2d) and 'conv' in name and 'dwconv' not in name.lower():
+                    config['name'] = name
                     module.conv = replace_conv(module.conv, config)
                     self.quant_conv[f'{name}.conv'] = module.conv
+            if isinstance(module, Selective_Scan):
+                # x_proj
+                config['name'] = name + ".x_proj_weight"
+                module.x_proj_weight_quant = QuantWeight(module.x_proj_weight, config)
+                module.x_proj_weight_quant.set_quant_flag(True)
+                self.quant_linears[f"{name}.x_proj_weight"] = module.x_proj_weight_quant
 
-        
+                # dt_projs weight
+                config['name'] = name + ".dt_projs_weight"
+                module.dt_projs_weight_quant = QuantWeight(module.dt_projs_weight, config)
+                module.dt_projs_weight_quant.set_quant_flag(True)
+                self.quant_linears[f"{name}.dt_projs_weight"] = module.dt_projs_weight_quant
+
+                # # dt_projs bias (optional)
+                # config['name'] = name + ".dt_projs_bias"
+                # module.dt_projs_bias_quant = QuantWeight(module.dt_projs_bias, config)
+                # module.dt_projs_bias_quant.set_quant_flag(True)
+                # self.quant_linears[f"{name}.dt_projs_bias"] = module.dt_projs_bias_quant
+                    
     def build_hooks_on_Q_and_F(self):
-        from basicsr.archs.swinir_arch import BasicLayer, SwinTransformerBlock
 
         self.feature_F = []
         self.feature_Q = []
 
         if self.opt["quant"]["hook_per_layer"]:
-            hook_type = BasicLayer
+            hook_type = BasicBlock  # ASSB contains BasicBlock which is equivalent to a layer
         elif self.opt["quant"]["hook_per_block"]:
-            hook_type = SwinTransformerBlock
+            hook_type = AttentiveLayer  # Individual AttentiveLayer blocks
 
         def hook_layer_forward(
             module: Module, input: Tensor, output: Tensor, buffer: list
@@ -256,6 +363,11 @@ class TDQuantModel:
     def optimize_parameters(self, current_iter):
         
         self.net_Q.eval()
+        # print("hre")
+        # for name, param in self.net_Q.named_parameters():
+        #     if param.requires_grad: 
+        #         if "quantizer" not in name and "bound" not in name and "beta" not in name and "alpha" not in name: 
+        #             print(name)
         self.feature_Q.clear()
         self.feature_F.clear()
         ##this is where to do the time eval, divide given time by batch size usually 16 
@@ -389,15 +501,12 @@ class TDQuantModel:
             del self.output
             torch.cuda.empty_cache()
 
+            # calculate metrics
             if with_metrics:
-                # calculate metrics
                 for name, opt_ in self.opt["val"]["metrics"].items():
-                    if name == 'psnr':
-                        psnr = calculate_metric(metric_data, opt_)
                     self.metric_results[name] += calculate_metric(metric_data, opt_)
-                    
+
             if save_img:
-                #print('here?')
                 if self.opt["is_train"]:
                     save_img_path = osp.join(
                         self.opt["path"]["visualization"],
@@ -405,13 +514,14 @@ class TDQuantModel:
                         f"{img_name}_{current_iter}.png",
                     )
                 else:
-                    if self.opt["val"].get("suffix", False):
+                    if self.opt["val"]["suffix"]:
                         save_img_path = osp.join(
                             self.opt["path"]["visualization"],
                             dataset_name,
                             f'{img_name}_{self.opt["val"]["suffix"]}.png',
                         )
                     else:
+                        psnr = self.metric_results.get('psnr', 0)
                         save_img_path = osp.join(
                             self.opt["path"]["visualization"],
                             dataset_name,
@@ -422,13 +532,7 @@ class TDQuantModel:
             if use_pbar:
                 pbar.update(1)
                 pbar.set_description(f"Test {img_name}")
-        # self.time_forward = 0.0
-        # self.time_get_visual = 0.0
-        # self.time_save_img = 0.0
-        # self.time_cal_metric = 0.0
-        # self.time_total = 0.0
         
-        # ,time_forward:{self.time_forward:.2f},time_get_visual:{self.time_get_visual:.2f}')
         if use_pbar:
             pbar.close()
         
@@ -442,12 +546,6 @@ class TDQuantModel:
                 )
 
             self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
-        
-        # print(f'time_forward:{self.time_forward:.2f}')
-        # print(f'time_get_visual:{self.time_get_visual:.2f}')
-        # print(f'time_save_img:{self.time_save_img:.2f}')
-        # print(f'time_cal_metric:{self.time_cal_metric:.2f}')
-        # print(f'time_total:{self.time_total:.2f}')
 
 
     def _log_validation_metric_values(self, current_iter, dataset_name, tb_logger):
@@ -470,27 +568,137 @@ class TDQuantModel:
                 )
 
     def test(self):
-        # pad to multiplication of window_size
-        # we do not use self-ensamble.
+        # MambaIRv2Light uses partitioning strategy for large images
+        if self.opt['quant'].get('use_partition', True):
+            self.test_with_partition()
+        else:
+            self.test_without_partition()
+    
+    def test_with_partition(self):
+        """Test by partitioning - MambaIRv2Light strategy"""
+        _, C, h, w = self.lq.size()
+        split_token_h = h // 200 + 1  # number of horizontal cut sections
+        split_token_w = w // 200 + 1  # number of vertical cut sections
+        
+        # padding
+        mod_pad_h, mod_pad_w = 0, 0
+        if h % split_token_h != 0:
+            mod_pad_h = split_token_h - h % split_token_h
+        if w % split_token_w != 0:
+            mod_pad_w = split_token_w - w % split_token_w
+        img = torch.nn.functional.pad(self.lq, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
+        _, _, H, W = img.size()
+        
+        split_h = H // split_token_h  # height of each partition
+        split_w = W // split_token_w  # width of each partition
+        
+        # overlapping
+        shave_h = split_h // 10
+        shave_w = split_w // 10
+        scale = self.opt.get('scale', 1)
+        ral = H // split_h
+        row = W // split_w
+        
+        slices = []  # list of partition borders
+        for i in range(ral):
+            for j in range(row):
+                if i == 0 and i == ral - 1:
+                    top = slice(i * split_h, (i + 1) * split_h)
+                elif i == 0:
+                    top = slice(i*split_h, (i+1)*split_h+shave_h)
+                elif i == ral - 1:
+                    top = slice(i*split_h-shave_h, (i+1)*split_h)
+                else:
+                    top = slice(i*split_h-shave_h, (i+1)*split_h+shave_h)
+                if j == 0 and j == row - 1:
+                    left = slice(j*split_w, (j+1)*split_w)
+                elif j == 0:
+                    left = slice(j*split_w, (j+1)*split_w+shave_w)
+                elif j == row - 1:
+                    left = slice(j*split_w-shave_w, (j+1)*split_w)
+                else:
+                    left = slice(j*split_w-shave_w, (j+1)*split_w+shave_w)
+                temp = (top, left)
+                slices.append(temp)
+        
+        img_chops = []  # list of partitions
+        for temp in slices:
+            top, left = temp
+            img_chops.append(img[..., top, left])
+        
+        if hasattr(self, "net_g_ema"):
+            self.net_g_ema.eval()
+            with torch.no_grad():
+                outputs = []
+                for chop in img_chops:
+                    out = self.net_g_ema(chop)
+                    outputs.append(out)
+                _img = torch.zeros(1, C, H * scale, W * scale).to(self.device)
+                # merge
+                for i in range(ral):
+                    for j in range(row):
+                        top = slice(i * split_h * scale, (i + 1) * split_h * scale)
+                        left = slice(j * split_w * scale, (j + 1) * split_w * scale)
+                        if i == 0:
+                            _top = slice(0, split_h * scale)
+                        else:
+                            _top = slice(shave_h*scale, (shave_h+split_h)*scale)
+                        if j == 0:
+                            _left = slice(0, split_w*scale)
+                        else:
+                            _left = slice(shave_w*scale, (shave_w+split_w)*scale)
+                        _img[..., top, left] = outputs[i * row + j][..., _top, _left]
+                self.output = _img
+        else:
+            self.net_Q.eval()
+            with torch.no_grad():
+                outputs = []
+                for chop in img_chops:
+                    out = self.net_Q(chop)
+                    outputs.append(out)
+                _img = torch.zeros(1, C, H * scale, W * scale).to(self.device)
+                # merge
+                for i in range(ral):
+                    for j in range(row):
+                        top = slice(i * split_h * scale, (i + 1) * split_h * scale)
+                        left = slice(j * split_w * scale, (j + 1) * split_w * scale)
+                        if i == 0:
+                            _top = slice(0, split_h * scale)
+                        else:
+                            _top = slice(shave_h * scale, (shave_h + split_h) * scale)
+                        if j == 0:
+                            _left = slice(0, split_w * scale)
+                        else:
+                            _left = slice(shave_w * scale, (shave_w + split_w) * scale)
+                        _img[..., top, left] = outputs[i * row + j][..., _top, _left]
+                self.output = _img
+        
+        _, _, h_out, w_out = self.output.size()
+        self.output = self.output[:, :, 0:h_out - mod_pad_h * scale, 0:w_out - mod_pad_w * scale]
+    
+    def test_without_partition(self):
+        """Original test method without partitioning"""
+        # MambaIRv2 uses window-based padding similar to SwinIR
         if not self.opt['quant'].get('self_ensamble', False):
             
-            window_size = self.opt["network_Q"]["window_size"]
+            # MambaIRv2 uses window_size for padding
+            window_size = self.opt["network_Q"].get("window_size", 16)
             scale = self.opt.get("scale", 1)
             mod_pad_h, mod_pad_w = 0, 0
             _, _, h, w = self.lq.size()
+            
+            # Calculate padding needed for window size
             if h % window_size != 0:
                 mod_pad_h = window_size - h % window_size
             if w % window_size != 0:
                 mod_pad_w = window_size - w % window_size
-            # img = F.pad(self.lq, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
-            # 修改（按源码）
+            
             img = self.lq
-            img = torch.cat([img, torch.flip(img, [2])], 2)[:, :, : h + mod_pad_h, :]
-            img = torch.cat([img, torch.flip(img, [3])], 3)[:, :, :, : w + mod_pad_w]
+            if mod_pad_h > 0 or mod_pad_w > 0:
+                img = torch.cat([img, torch.flip(img, [2])], 2)[:, :, : h + mod_pad_h, :]
+                img = torch.cat([img, torch.flip(img, [3])], 3)[:, :, :, : w + mod_pad_w]
             
             if self.opt['quant'].get('bicubic', False):
-                # print(img.size())
-                # exit(0)
                 resize = Resize((img.size(2) * self.opt['network_Q']['upscale'], img.size(3) * self.opt['network_Q']['upscale']))
                 self.output = resize(img)
             elif self.opt['quant'].get('fp_test', False):
@@ -505,20 +713,15 @@ class TDQuantModel:
                 else:
                     self.net_Q.eval()
                     with torch.no_grad():
-                        # print("I AM HERE~!!!!",flush=True)
-                        #I can also do tme eval here i think #have to do it here i think 
-                        # start = time.time()
                         self.output = self.net_Q(img)
-                        # print(img.shape)
-                        # out = time.time()-start
-                        # print("time taken q", out, flush=True)
-                    self.net_Q.eval()
+                self.net_Q.eval()
 
             _, _, h, w = self.output.size()
             self.output = self.output[
                 :, :, 0 : h - mod_pad_h * scale, 0 : w - mod_pad_w * scale
             ]
         else:
+            # Self-ensemble inference
             transforms = [
                 (lambda x: x, lambda y: y),  # No-op
                 (lambda x: x.flip(2), lambda y: y.flip(2)),  # Vertical flip
@@ -529,7 +732,7 @@ class TDQuantModel:
                 (lambda x: x.transpose(2, 3).flip(3), lambda y: y.flip(3).transpose(2, 3)),  # Rotate 90 degrees + Horizontal flip
                 (lambda x: x.transpose(2, 3).flip(2).flip(3), lambda y: y.flip(2).flip(3).transpose(2, 3))  # Rotate 90 degrees + Vertical + Horizontal flip
             ]
-            window_size = self.opt["network_Q"]["window_size"]
+            window_size = self.opt["network_Q"].get("window_size", 16)
             scale = self.opt.get("scale", 1)
             mod_pad_h, mod_pad_w = 0, 0
             _, _, h, w = self.lq.size()
@@ -537,17 +740,16 @@ class TDQuantModel:
                 mod_pad_h = window_size - h % window_size
             if w % window_size != 0:
                 mod_pad_w = window_size - w % window_size
-            # img = F.pad(self.lq, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
-            # 修改（按源码）
-            # real_outputs = []
+            
             inputs = []
             
             for transform, inverse_transform in transforms:
                 img = self.lq
-                img = torch.cat([img, torch.flip(img, [2])], 2)[:, :, : h + mod_pad_h, :]
-                img = torch.cat([img, torch.flip(img, [3])], 3)[:, :, :, : w + mod_pad_w]
+                if mod_pad_h > 0 or mod_pad_w > 0:
+                    img = torch.cat([img, torch.flip(img, [2])], 2)[:, :, : h + mod_pad_h, :]
+                    img = torch.cat([img, torch.flip(img, [3])], 3)[:, :, :, : w + mod_pad_w]
                 inputs.append(transform(img))
-                # print(img.size())
+            
             batch_input_1 = torch.cat(inputs[:4], dim=0)
             batch_input_2 = torch.cat(inputs[4:], dim=0)
             
@@ -555,21 +757,13 @@ class TDQuantModel:
                 self.net_g_ema.eval()
                 with torch.no_grad():
                     output1 = self.net_g_ema(batch_input_1)
-            else:
-                self.net_Q.eval()
-                with torch.no_grad():
-                    output1 = self.net_Q(batch_input_1)
-            if hasattr(self, "net_g_ema"):
-                self.net_g_ema.eval()
-                with torch.no_grad():
                     output2 = self.net_g_ema(batch_input_2)
             else:
                 self.net_Q.eval()
                 with torch.no_grad():
+                    output1 = self.net_Q(batch_input_1)
                     output2 = self.net_Q(batch_input_2)
-                # real_outputs.append(output)
-            # output = output1 + output2
-            # output = torch.cat([output1, output2], dim=0)
+            
             outputs1 = torch.chunk(output1, len(transforms), dim=0)
             outputs2 = torch.chunk(output2, len(transforms), dim=0)
             outputs = outputs1 + outputs2
@@ -825,39 +1019,34 @@ class TDQuantModel:
         for net_, param_key_ in zip(net, param_key):
             net_ = self.get_bare_model(net_)
             state_dict = net_.state_dict()
-            # print("zipping loop", net_,param_key_,flush=True)
             for key, param in state_dict.items():
                 if key.startswith("module."):  # remove unnecessary 'module.'
                     key = key[7:]
-                # print(key,flush=True)
                 state_dict[key] = param.cpu()
             save_dict[param_key_] = state_dict
+        
         # Matches any quantizer-like child under a module
         _QUANT_TOKEN_RE = re.compile(
-            r"(?:^|[._])(act_quantizer|weight_quantizer|mymodule_[qkva])(?:[._]|$)"
+            r"(?:^|[._])(act_quantizer|weight_quantizer|mymodule_[qkva]|mymodule_attn|mymodule_x|mymodule_prompt|mymodule_scan)(?:[._]|$)"
         )
 
         def is_quantizer_key(key: str) -> bool:
             return bool(_QUANT_TOKEN_RE.search(key))
+        
         def quant_scope_from_key(key: str):
             """
-            Strip trailing '.{act,weight}_quantizer....' but KEEP '.mymodule_[qkva]' in the scope.
-            Examples:
-            '...attn.qkv.q.weight_quantizer.lower_bound' -> '...attn.qkv.q'
-            '...mlp.fc1.act_quantizer.beta_Z'            -> '...mlp.fc1'
-            '...attn.mymodule_q.lower_bound'             -> '...attn.mymodule_q'
+            Strip trailing '.{act,weight}_quantizer....' but KEEP '.mymodule_*' in the scope.
             """
             m = re.match(
-                r"^(?P<prefix>.*?)(?:\.(?P<aq>act_quantizer|weight_quantizer)(?:\.|$)|\.(?P<mm>mymodule_[qkva])(?:\.|$))",
+                r"^(?P<prefix>.*?)(?:\.(?P<aq>act_quantizer|weight_quantizer)(?:\.|$)|\.(?P<mm>mymodule_[qkva]|mymodule_attn|mymodule_x|mymodule_prompt|mymodule_scan)(?:\.|$))",
                 key
             )
             if not m:
                 return None
             if m.group("aq"):                # act/weight quantizer -> drop token
                 return m.group("prefix")
-            else:                             # mymodule_[qkva] -> keep token
+            else:                             # mymodule_* -> keep token
                 return f"{m.group('prefix')}.{m.group('mm')}"
-                # avoid occasional writing errors
         
         def parent_scope_of_weight(key: str):
             # '...foo.weight' -> '...foo'
@@ -882,9 +1071,6 @@ class TDQuantModel:
                             quant_scopes.add(scope)
 
                 # 2) Tally bytes
-                # totals = defaultdict(int)
-                # by_dtype = defaultdict(int)
-                # largest = []
                 total = 0
                 for k, t in state_dict.items():
                     if not torch.is_tensor(t):
@@ -893,12 +1079,10 @@ class TDQuantModel:
                     wscope = parent_scope_of_weight(k)
                     if wscope is not None:
                         if wscope in quant_scopes:
-                            nbytes = (2/8) * t.nelement() #*0.6 + 0.125 * t.nelement()  #two bits + 40% pruning ratio + 1 bit mask # for 2dquants calculation, can ignore alpha and beta params in the calc must add this
-                            
+                            nbytes = (2/8) * t.nelement()
                             total+= nbytes 
                         else:
                             nbytes = t.element_size() * t.nelement()
-                            
                             total += nbytes
                     else:
                         nbytes = t.element_size() * t.nelement()
@@ -919,9 +1103,6 @@ class TDQuantModel:
                             quant_scopes.add(scope)
 
                 # 2) Tally bytes
-                # totals = defaultdict(int)
-                # by_dtype = defaultdict(int)
-                # largest = []
                 total = 0
                 for k, t in state_dict.items():
                     if not torch.is_tensor(t):
@@ -930,43 +1111,33 @@ class TDQuantModel:
                     wscope = parent_scope_of_weight(k)
                     if wscope is not None:
                         if wscope in quant_scopes:
-                            nbytes = (2/8) * t.nelement() *0.6 + 0.125 * t.nelement()  #two bits + 40% pruning ratio + 1 bit mask # for 2dquants calculation, can ignore alpha and beta params in the calc must add this
-                            
+                            nbytes = (2/8) * t.nelement() *0.6 + 0.125 * t.nelement()
                             total+= nbytes 
                         else:
                             nbytes = t.element_size() * t.nelement()
-                            
                             total += nbytes
                     else:
                         nbytes = t.element_size() * t.nelement()
                         total += nbytes
-            return to_mb(total) 
+            return to_mb(total)
+        
         def analyze_save_dict_2dquant(save_dict: dict, topk: int = 10) -> None:
             grand = defaultdict(int)
 
             print("=" * 90,flush=True)
             for model_name, state_dict in save_dict.items():
-                # print("savedict2dquant", model_name, state_dict,flush=True)
                 # 1) Collect all scopes that have any quantizer
                 quant_scopes = set()
                 for k in state_dict.keys():
-                    # print(k,flush=True)
                     if is_quantizer_key(k):
                         scope = quant_scope_from_key(k)
-                        # print("scope", scope)
                         if scope:
                             quant_scopes.add(scope)
 
                 # 2) Tally bytes
-                # totals = defaultdict(int)
-                # by_dtype = defaultdict(int)
-                # largest = []
-                # print(quant_scopes,flush=True)
                 total = 0
                 for k, t in state_dict.items():
-                    # print(type(key), key,flush=True)
                     if "alpha" in k or "beta_Z" in k: 
-                        # print("hererere")
                         continue 
                     if not torch.is_tensor(t):
                         continue
@@ -974,17 +1145,16 @@ class TDQuantModel:
                     wscope = parent_scope_of_weight(k)
                     if wscope is not None:
                         if wscope in quant_scopes:
-                            nbytes = (2/8) * t.nelement() * 1  #4 bits + 0% pruning ratio + 1 bit mask # for 2dquants calculation, can ignore alpha and beta params in the calc must add this
-                            
+                            nbytes = (2/8) * t.nelement() * 1
                             total+= nbytes 
                         else:
                             nbytes = t.element_size() * t.nelement()
-                            
                             total += nbytes
                     else:
                         nbytes = t.element_size() * t.nelement()
                         total += nbytes
             return to_mb(total) 
+        
         def torch_save_size_mb(obj, use_zip=True):
             buf = io.BytesIO()
             torch.save(obj, buf, _use_new_zipfile_serialization=use_zip)
@@ -1021,7 +1191,6 @@ class TDQuantModel:
                 retry -= 1
         if retry == 0:
             logger.warning(f"Still cannot save {save_path}. Just ignore it.")
-            # raise IOError(f'Cannot save {save_path}.')
 
     def _print_different_keys_loading(self, crt_net, load_net, strict=True):
         """Print keys with different name or different size when loading models.
@@ -1079,8 +1248,6 @@ class TDQuantModel:
                 param_key = "params"
                 logger.info("Loading: params_ema does not exist, use params.")
             load_net = load_net[param_key]
-            # print(load_net)
-            # print(net)
         logger.info(
             f"Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}]."
         )
@@ -1132,7 +1299,6 @@ class TDQuantModel:
                     retry -= 1
             if retry == 0:
                 logger.warning(f"Still cannot save {save_path}. Just ignore it.")
-                # raise IOError(f'Cannot save {save_path}.')
 
     def resume_training(self, resume_state):
         """Reload the optimizers and schedulers for resumed training.
