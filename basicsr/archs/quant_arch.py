@@ -105,6 +105,78 @@ def prune_bands(had_x, keep_frac):
     # print("percent", percent,1-keep_frac,flush=True)
     assert abs(percent-(1-keep_frac)) < 0.05 
     return out 
+
+def prune_channels(had_x: torch.Tensor, keep_frac: float, channel_dim: int = 0):
+    """
+    Prune entire channels with the lowest average absolute magnitude until we reach
+    approximately the desired pruning percentage.
+
+    Args:
+        had_x: Tensor of activations/weights, e.g. [C, H, W] or [C, ...].
+        keep_frac: Fraction of channels to keep (0.0–1.0).
+        channel_dim: Dimension that corresponds to channels (default 0).
+
+    Returns:
+        Tensor with some whole channels zeroed out.
+    """
+    if keep_frac >= 1.0:
+        return had_x
+    if keep_frac <= 0.0:
+        return torch.zeros_like(had_x)
+
+    device = had_x.device
+    ndims = had_x.dim()
+    channel_dim = channel_dim % ndims  # handle negative dims
+
+    num_channels = had_x.size(channel_dim)
+    if num_channels == 0:
+        return had_x
+
+    # Number of channels to keep (rounded)
+    channels_to_keep = max(0, min(num_channels, int(round(keep_frac * num_channels))))
+
+    if channels_to_keep == 0:
+        return torch.zeros_like(had_x)
+    if channels_to_keep == num_channels:
+        return had_x
+
+    # Compute mean absolute value per channel
+    dims = list(range(ndims))
+    reduce_dims = [d for d in dims if d != channel_dim]
+    # Shape: [num_channels]
+    mean_abs_per_channel = had_x.abs().mean(dim=reduce_dims)
+
+    # Sort channels by ascending mean |value|
+    _, sorted_idx = torch.sort(mean_abs_per_channel, descending=False)
+
+    # Keep the channels with the largest mean |value|
+    keep_idx = sorted_idx[-channels_to_keep:]
+
+    # Build a channel mask and broadcast to full tensor shape
+    channel_mask = torch.zeros(num_channels, dtype=torch.bool, device=device)
+    channel_mask[keep_idx] = True
+
+    # Reshape mask to broadcast over all other dims
+    mask_shape = [1] * ndims
+    mask_shape[channel_dim] = num_channels
+    channel_mask = channel_mask.view(mask_shape)
+
+    out = had_x * channel_mask
+
+    # Optional sanity check on approximate sparsity
+    total = out.numel()
+    zero_count = (out == 0).sum().item()
+    percent_zero = zero_count / total
+    target_zero = 1.0 - keep_frac
+    # print(percent_zero)
+    # Allow some slack because we’re pruning whole channels (discrete)
+    assert abs(percent_zero - target_zero) < 0.15, (
+        f"Sparsity off more than 0.15: got {percent_zero:.3f}, "
+        f"target {target_zero:.3f}"
+    )
+
+    return out
+
 def DOBI(input:torch.Tensor, bit:int, one_direction = False, num:int=100):
     min_value = torch.min(input)
     max_value = torch.max(input)
