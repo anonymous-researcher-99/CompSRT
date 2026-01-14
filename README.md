@@ -19,15 +19,33 @@ cd CompSRT
 # conda env
 conda create -n srtquant python=3.9 -y
 conda activate srtquant
-
-# pytorch (CUDA 11.1 wheels)
+#optional: set paths for cuda
+#export CUDA_HOME=/usr/local/cuda-11.7
+#export PATH=$CUDA_HOME/bin:$PATH
+#export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH}
 pip install six
-pip install torch==1.8.0+cu111 torchvision==0.9.0+cu111 torchaudio===0.8.0 \
-  -f https://download.pytorch.org/whl/torch_stable.html
+pip install --no-cache-dir \
+  torch==2.0.1+cu117 \
+  torchvision==0.15.2+cu117 \
+  torchaudio==2.0.2 \
+  --index-url https://download.pytorch.org/whl/cu117
 
-# project deps
 pip install -r requirements.txt
-python setup.py develop
+
+pip install -e . --no-build-isolation -v
+
+#version mismatch fix
+pip uninstall -y numpy opencv-python opencv-python-headless transformers tokenizers huggingface-hub causal-conv1d mamba-ssm 
+
+pip install opencv-python==4.9.0.80
+pip install numpy==1.24.3
+pip install transformers==4.37.1 tokenizers==0.15.1 huggingface-hub==0.20.3
+pip install causal_conv1d==1.0.0 --no-build-isolation
+pip install mamba_ssm==1.0.1 --no-build-isolation
+
+pip install -v --no-build-isolation causal_conv1d==1.0.0
+
+pip install -v --no-build-isolation mamba_ssm==1.0.1
 ```
 > With Docker & Singularity 
 
