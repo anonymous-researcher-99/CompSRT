@@ -22,32 +22,42 @@ RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkg
  && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
 # Create env
-RUN conda create -y -n srtquant python=3.10 && conda clean -afy
+RUN conda create -y -n srtquant python=3.9 
 ENV CONDA_DEFAULT_ENV=srtquant
 ENV PATH=$CONDA_DIR/envs/srtquant/bin:$PATH
-
-RUN conda install -c conda-forge opencv -y
-
-# (Optional) faster pip
-RUN python -m pip install --no-cache-dir --upgrade pip
+ENV CUDA_HOME=/usr/local/cuda-11.7
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
 # Working directory
 WORKDIR /workspace
 
 # Copy requirements first
-COPY requirements.txt /workspace/requirements.txt
-
-# Install dependencies: six first, then latest torch/cu118 wheels, then reqs
-RUN pip install --no-cache-dir six \
- && pip install --no-cache-dir torch==2.0.1+cu118 torchvision==0.15.2+cu118 torchaudio==2.0.2 \
-      --index-url https://download.pytorch.org/whl/cu118 \
- && pip install --no-cache-dir -r requirements.txt
-
 # Copy your project
 COPY . /workspace
 
-# Install your package
-RUN python setup.py develop
+RUN pip install six
+RUN pip install --no-cache-dir \
+  torch==2.0.1+cu117 \
+  torchvision==0.15.2+cu117 \
+  torchaudio==2.0.2 \
+  --index-url https://download.pytorch.org/whl/cu117
+
+RUN pip install -r requirements.txt
+
+RUN pip install -e . --no-build-isolation -v
+
+RUN pip uninstall -y numpy opencv-python opencv-python-headless transformers tokenizers huggingface-hub causal-conv1d mamba-ssm 
+
+RUN pip install opencv-python==4.9.0.80
+RUN pip install numpy==1.24.3
+RUN pip install transformers==4.37.1 tokenizers==0.15.1 huggingface-hub==0.20.3
+RUN pip install causal_conv1d==1.0.0 --no-build-isolation
+RUN pip install mamba_ssm==1.0.1 --no-build-isolation
+
+RUN pip install -v --no-build-isolation causal_conv1d==1.0.0
+
+RUN pip install -v --no-build-isolation mamba_ssm==1.0.1
 
 # Default shell
 CMD ["/bin/bash"]
