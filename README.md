@@ -17,7 +17,7 @@ git clone https://github.com/anonymous-researcher-99/CompSRT.git
 cd CompSRT
 
 # conda env
-conda create -n srtquant python=3.8 -y
+conda create -n srtquant python=3.9 -y
 conda activate srtquant
 
 # pytorch (CUDA 11.1 wheels)
