@@ -34,14 +34,15 @@ pip install -r requirements.txt
 
 pip install -e . --no-build-isolation -v
 
+#pip install wheel
 #version mismatch fix
-pip uninstall -y numpy opencv-python opencv-python-headless transformers tokenizers huggingface-hub causal-conv1d mamba-ssm 
+#pip uninstall -y numpy opencv-python opencv-python-headless transformers tokenizers huggingface-hub causal-conv1d mamba-ssm 
 
-pip install opencv-python==4.9.0.80
-pip install numpy==1.24.3
-pip install transformers==4.37.1 tokenizers==0.15.1 huggingface-hub==0.20.3
-pip install causal_conv1d==1.0.0 --no-build-isolation
-pip install mamba_ssm==1.0.1 --no-build-isolation
+#pip install opencv-python==4.9.0.80
+#pip install numpy==1.24.3
+#pip install transformers==4.37.1 tokenizers==0.15.1 huggingface-hub==0.20.3
+#pip install causal_conv1d==1.0.0 --no-build-isolation
+#pip install mamba_ssm==1.0.1 --no-build-isolation
 
 pip install -v --no-build-isolation causal_conv1d==1.0.0
 
